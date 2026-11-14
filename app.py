@@ -112,29 +112,271 @@ def call_claude(messages, max_tokens=500) -> str:
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
 
 
+def answer_question(df: pd.DataFrame, question: str) -> str:
+    """Answer common FlameLens questions using only the selected data."""
+    if df.empty:
+        return "No experimental records are available for the current selection."
+
+    q = question.lower()
+    measured = df.dropna(subset=["spread_rate_mm_s"])
+    rates = measured["spread_rate_mm_s"]
+    records = len(df)
+
+    def fmt(value):
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+
+    # Number of records
+    if any(x in q for x in ["how many", "number of", "count"]):
+        return f"There are **{records} experimental records** in the selected dataset."
+
+    # Pressure availability
+    if "pressure" in q:
+        valid = df.dropna(subset=["pressure_kpa"])
+        if valid.empty:
+            return (
+                "Pressure data is unavailable for all "
+                f"**{records} records**. Therefore, the experiment "
+                "with the highest pressure cannot be identified."
+            )
+        if any(x in q for x in ["highest", "maximum", "maximum", "max"]):
+            r = valid.loc[valid["pressure_kpa"].idxmax()]
+            return f"Highest recorded pressure: **{r['pressure_kpa']} kPa**, for {r['material']}."
+        return f"Pressure is reported in {len(valid)} of {records} records."
+
+    # Missing data
+    if any(x in q for x in ["missing", "not reported", "unavailable", "absent"]):
+        missing_spread = int(df["spread_rate_mm_s"].isna().sum())
+        missing_pressure = int(df["pressure_kpa"].isna().sum())
+        return (
+            f"**Missing data summary:**\n"
+            f"- Spread rate missing in {missing_spread} records.\n"
+            f"- Pressure missing in {missing_pressure} records.\n\n"
+            "Missing values are not zero. They must remain missing and "
+            "be excluded from calculations that require those measurements."
+        )
+
+    # Major observations
+    if any(x in q for x in ["major observation", "key observation", "summarize", "summary"]):
+        if measured.empty:
+            return f"There are {records} records, but no numerical spread rates."
+        return (
+            f"**Major observations:**\n"
+            f"- Total records: {records}\n"
+            f"- Numerical spread measurements: {len(measured)}\n"
+            f"- Highest spread: {fmt(rates.max())} mm/s\n"
+            f"- Lowest spread: {fmt(rates.min())} mm/s\n"
+            f"- Missing spread rates: {int(df['spread_rate_mm_s'].isna().sum())}\n"
+            f"- Missing pressure values: {int(df['pressure_kpa'].isna().sum())}\n"
+            "A reliable material risk ranking cannot be established from this small dataset."
+        )
+
+    # Material comparison
+    materials = df["material"].dropna().unique().tolist()
+    aliases = {
+        "cotton-fiberglass": "Cotton-fiberglass fabric (SIBAL)",
+        "cotton fiberglass": "Cotton-fiberglass fabric (SIBAL)",
+        "silicone": "Silicone sheet",
+        "pmma slab": "PMMA slab",
+        "pmma/nomex": "PMMA/Nomex composite",
+    }
+
+    matched = [m for m in materials if m.lower() in q]
+
+    for alias, full_name in aliases.items():
+        if alias in q and full_name in materials and full_name not in matched:
+            matched.append(full_name)
+    if "compare" in q and len(matched) >= 2:
+        results = []
+        for material in matched[:2]:
+            subset = df[df["material"] == material]
+            values = subset["spread_rate_mm_s"].dropna()
+            if values.empty:
+                results.append(f"- **{material}:** No numerical spread rates reported.")
+            else:
+                results.append(
+                    f"- **{material}:** {', '.join(fmt(v) for v in values)} mm/s "
+                    f"({len(values)} measured records)."
+                )
+        return "\n".join(results) + (
+            "\n\nMissing measurements must not be interpreted as zero."
+        )
+
+    # Highest / lowest / average spread rate
+    # Low-oxygen spread analysis
+    if "oxygen" in q and any(x in q for x in ["low oxygen", "below 22", "under 22"]):
+        low_oxygen = measured[measured["oxygen_pct"] < 22]
+
+        if low_oxygen.empty:
+            return "No numerical spread measurements are available below 22% oxygen."
+
+        avg = low_oxygen["spread_rate_mm_s"].mean()
+        materials = low_oxygen["material"].unique()
+
+        return (
+            f"Below 22% oxygen, **{materials[0]}** has the highest "
+            f"available average spread rate of **{fmt(avg)} mm/s**, "
+            f"based on {len(low_oxygen)} measurements. "
+            "This is a very small sample and does not establish a general trend."
+        )
+
+    
+    if "spread" in q or "flame" in q:
+        if measured.empty:
+            return "No numerical flame spread rates are available."
+
+        if any(x in q for x in ["average", "mean"]):
+            if "material" in q:
+                means = measured.groupby("material")["spread_rate_mm_s"].mean()
+                if len(means) == 1:
+                    return (
+                        f"Only **{means.index[0]}** has numerical spread measurements. "
+                        f"Its average is **{fmt(means.iloc[0])} mm/s**. "
+                        "A comparison between materials is not possible."
+                    )
+                return "Material averages:\n" + "\n".join(
+                    f"- {m}: {fmt(v)} mm/s" for m, v in means.items()
+                )
+            return (
+                f"The average spread rate is **{fmt(rates.mean())} mm/s**, "
+                f"calculated from {len(rates)} numerical measurements. "
+                f"{int(df['spread_rate_mm_s'].isna().sum())} missing values were excluded."
+            )
+
+        if any(x in q for x in ["highest", "maximum", "fastest", "max"]):
+            r = measured.loc[rates.idxmax()]
+            return (
+                f"**Highest recorded spread rate: {fmt(r['spread_rate_mm_s'])} mm/s.**\n"
+                f"- Material: {r['material']}\n"
+                f"- Oxygen: {r['oxygen_pct']}%\n"
+                f"- Airflow: {r['flow_cm_s']} cm/s\n"
+                f"- Record: {r.get('record_id', 'Not available')}"
+            )
+
+        if any(x in q for x in ["lowest", "minimum", "slowest", "min"]):
+            r = measured.loc[rates.idxmin()]
+            return (
+                f"**Lowest recorded spread rate: {fmt(r['spread_rate_mm_s'])} mm/s.**\n"
+                f"- Material: {r['material']}\n"
+                f"- Oxygen: {r['oxygen_pct']}%\n"
+                f"- Airflow: {r['flow_cm_s']} cm/s\n"
+                f"- Record: {r.get('record_id', 'Not available')}"
+            )
+
+    # Highest / lowest oxygen
+    if "oxygen" in q:
+        valid = df.dropna(subset=["oxygen_pct"])
+        if valid.empty:
+            return "Oxygen measurements are unavailable."
+        if any(x in q for x in ["highest", "maximum", "max"]):
+            value = valid["oxygen_pct"].max()
+            rows = valid[valid["oxygen_pct"] == value]
+            return (
+                f"Highest oxygen concentration: **~{fmt(value)}%**. "
+                f"Records: {', '.join(rows.get('record_id', rows.index.astype(str)).astype(str))}."
+            )
+        if any(x in q for x in ["lowest", "minimum", "min"]):
+            r = valid.loc[valid["oxygen_pct"].idxmin()]
+            return (
+                f"Lowest oxygen concentration: **~{fmt(r['oxygen_pct'])}%**, "
+                f"record {r.get('record_id', 'Not available')} ({r['material']})."
+            )
+
+        return (
+            "The measured spread rates vary across the available oxygen "
+            "concentrations. However, there are too few measurements and "
+            "other experimental conditions differ, so a causal oxygen effect "
+            "cannot be established."
+        )
+
+    # Airflow relationship
+    if "airflow" in q or "flow" in q:
+        if measured.empty:
+            return "No numerical spread rates are available for airflow analysis."
+        grouped = measured.groupby("flow_cm_s")["spread_rate_mm_s"].agg(["mean", "count"])
+        details = [
+            f"- {flow:g} cm/s: average {fmt(row['mean'])} mm/s "
+            f"({int(row['count'])} measurements)"
+            for flow, row in grouped.iterrows()
+        ]
+        return (
+            "**Observed airflow and spread rates:**\n"
+            + "\n".join(details)
+            + "\n\nThese observations are too limited to establish a causal "
+            "relationship between airflow and flame spread."
+        )
+
+    return (
+        "I couldn't identify that question. Try asking about spread rate, "
+        "oxygen, airflow, pressure, material comparison, missing data, "
+        "or the number of experiments."
+    )
+
+
+
 def offline_summary(df: pd.DataFrame, ranking: pd.DataFrame) -> str:
+    """Generate useful descriptive insights without an AI API."""
     if df.empty:
         return "No data selected."
-    if ranking.empty:  # too few measured spread rates for a ranking: describe what was observed
-        parts = []
-        for _, r in df.iterrows():
-            sp = f"{r['spread_rate_mm_s']} mm/s" if pd.notna(r["spread_rate_mm_s"]) else "no spread rate reported"
-            parts.append(f"- {r['material']} ({r.get('configuration', '')}, {r['flow_cm_s']} cm/s, ~{r['oxygen_pct']}% O2): {sp}")
-        return ("**Observed experiments (no ranking: too few measured spread rates):**\n\n" + "\n".join(parts)
-                + "\n\n_Rule-based summary (no AI key set). Analysis aid only, not a safety certification._")
-    top, safest = ranking.iloc[0], ranking.iloc[-1]
-    corr = df["oxygen_pct"].corr(df["spread_rate_mm_s"])
+
+    measured = df.dropna(subset=["spread_rate_mm_s"])
+    missing_spread = int(df["spread_rate_mm_s"].isna().sum())
+    missing_pressure = int(df["pressure_kpa"].isna().sum())
+
     lines = [
-        f"**Highest risk:** {top['material']} (mean risk {top['mean_risk']}, fastest spread {top['max_spread_mm_s']} mm/s).",
-        f"**Lowest risk:** {safest['material']} (mean risk {safest['mean_risk']}).",
+        "### Dataset overview",
+        f"- Total experimental records: **{len(df)}**",
+        f"- Records with numerical spread rates: **{len(measured)}**",
+        f"- Missing spread rates: **{missing_spread}**",
+        f"- Missing pressure measurements: **{missing_pressure}**",
     ]
-    if pd.notna(top.get("lowest_o2_that_burned_pct")):
-        lines.append(f"{top['material']} still burned at {top['lowest_o2_that_burned_pct']}% oxygen.")
-    if pd.notna(corr):
-        trend = "increases" if corr > 0 else "decreases"
-        lines.append(f"In this selection, flame spread {trend} with oxygen (correlation {corr:.2f}).")
-    lines.append("_Rule-based summary (no AI key set). Analysis aid only, not a safety certification._")
-    return "\n\n".join(lines)
+
+    if not measured.empty:
+        fastest = measured.loc[measured["spread_rate_mm_s"].idxmax()]
+        slowest = measured.loc[measured["spread_rate_mm_s"].idxmin()]
+
+        lines += [
+            "",
+            "### Flame spread observations",
+            f"- Highest recorded spread: **{fastest['spread_rate_mm_s']} mm/s** "
+            f"({fastest['material']}, record {fastest.get('record_id', 'N/A')}).",
+            f"- Lowest recorded spread: **{slowest['spread_rate_mm_s']} mm/s** "
+            f"({slowest['material']}, record {slowest.get('record_id', 'N/A')}).",
+            f"- Average of the {len(measured)} numerical measurements: "
+            f"**{measured['spread_rate_mm_s'].mean():.2f} mm/s**.",
+        ]
+
+        material_counts = measured.groupby("material")["spread_rate_mm_s"].count()
+
+        if len(material_counts) == 1:
+            lines.append(
+                f"- Numerical spread measurements are available only for "
+                f"**{material_counts.index[0]}**."
+            )
+
+    if missing_pressure == len(df):
+        lines.append("- Pressure is not reported in any selected experiment.")
+
+    if "outcome" in df.columns:
+        no_spread = int((df["outcome"].astype(str).str.lower() == "no_spread").sum())
+        if no_spread:
+            lines.append(
+                f"- **{no_spread} records** report no flame spread."
+            )
+
+    lines += [
+        "",
+        "### Interpretation and limitations",
+        "- The dataset is too small for a reliable material risk ranking.",
+        "- Oxygen and airflow effects cannot be established conclusively "
+        "from these limited observations.",
+        "- Missing measurements are not zero and are excluded from numerical calculations.",
+        "",
+        "_Rule-based insights from the selected data. This is an analysis aid, "
+        "not a safety certification._",
+    ]
+
+    return "\n".join(lines)
+
 
 
 # ----------------------------------------------------------------------------
@@ -294,7 +536,7 @@ with tab_chat:
             except Exception as e:  # noqa: BLE001
                 ans = f"AI call failed: {e}"
         else:
-            ans = "Chat needs an `ANTHROPIC_API_KEY`. Meanwhile:\n\n" + offline_summary(view, ranking)
+            ans = answer_question(view, q)
         st.session_state["chat"].append({"role": "assistant", "content": ans})
         st.chat_message("assistant").markdown(ans)
 
