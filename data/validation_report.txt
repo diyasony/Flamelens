@@ -1,0 +1,21 @@
+=== FlameLens data validation report ===
+File: /home/claude/deliver/data/experiments.csv
+Total records (rows): 11
+  DIGITIZED_ESTIMATE: 0
+  DIRECTLY_REPORTED: 11
+  UNIT_CONVERTED: 0
+Missing values:
+  oxygen_pct: 0 of 11
+  pressure_kpa: 11 of 11
+  flow_cm_s: 0 of 11
+  spread_rate_mm_s: 7 of 11
+  source: 0 of 11
+Distinct source documents referenced: 1
+Records with a numeric spread rate: 4
+Outcomes: spread=4, no_spread=4, see_notes=3
+
+ERRORS (0)
+WARNINGS (1)
+  - pressure_kpa is empty for ALL records (not reported by the source). Visuals and filters that depend on it will have nothing to show.
+
+RESULT: PASS (review warnings)
