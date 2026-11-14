@@ -39,7 +39,7 @@ def load_csv(file_or_path) -> pd.DataFrame:
         raise ValueError(f"CSV is missing required columns: {missing}. Required: {REQUIRED}")
     for c in REQUIRED[1:]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=REQUIRED).reset_index(drop=True)
+    df = df.dropna(subset=["material"]).reset_index(drop=True)  # blanks stay NaN, never 0
     for c in ("source", "notes"):
         if c not in df.columns:
             df[c] = ""
@@ -97,7 +97,7 @@ def ai_available() -> bool:
 def build_context(df: pd.DataFrame, ranking: pd.DataFrame) -> str:
     return (
         "EXPERIMENT DATA (CSV, up to 150 rows):\n"
-        + df.drop(columns=["notes"], errors="ignore").head(150).to_csv(index=False)
+        + df.head(150).to_csv(index=False)
         + "\nMATERIAL RISK RANKING (CSV):\n"
         + ranking.to_csv(index=False)
         + "\nRisk score = 0-100 heuristic from flame spread rate and oxygen level (see app methodology)."
@@ -113,8 +113,15 @@ def call_claude(messages, max_tokens=500) -> str:
 
 
 def offline_summary(df: pd.DataFrame, ranking: pd.DataFrame) -> str:
-    if df.empty or ranking.empty:
+    if df.empty:
         return "No data selected."
+    if ranking.empty:  # too few measured spread rates for a ranking: describe what was observed
+        parts = []
+        for _, r in df.iterrows():
+            sp = f"{r['spread_rate_mm_s']} mm/s" if pd.notna(r["spread_rate_mm_s"]) else "no spread rate reported"
+            parts.append(f"- {r['material']} ({r.get('configuration', '')}, {r['flow_cm_s']} cm/s, ~{r['oxygen_pct']}% O2): {sp}")
+        return ("**Observed experiments (no ranking: too few measured spread rates):**\n\n" + "\n".join(parts)
+                + "\n\n_Rule-based summary (no AI key set). Analysis aid only, not a safety certification._")
     top, safest = ranking.iloc[0], ranking.iloc[-1]
     corr = df["oxygen_pct"].corr(df["spread_rate_mm_s"])
     lines = [
@@ -154,10 +161,19 @@ sel_mats = st.sidebar.multiselect("Materials", mats, default=mats)
 
 
 def range_slider(label, col):
-    lo, hi = float(data[col].min()), float(data[col].max())
+    s = data[col].dropna()
+    if s.empty:  # variable not reported in this dataset
+        st.sidebar.caption(f"{label}: not reported in the loaded data")
+        return None
+    lo, hi = float(s.min()), float(s.max())
     if lo == hi:
         return lo, hi
     return st.sidebar.slider(label, lo, hi, (lo, hi))
+
+
+def in_range(col, rng):
+    """Keep rows inside the range; rows with an unreported value are kept, not dropped."""
+    return data[col].isna() if rng is None else (data[col].between(*rng) | data[col].isna())
 
 
 o2_rng = range_slider("Oxygen (%)", "oxygen_pct")
@@ -166,11 +182,13 @@ f_rng = range_slider("Flow speed (cm/s)", "flow_cm_s")
 
 view = data[
     data["material"].isin(sel_mats)
-    & data["oxygen_pct"].between(*o2_rng)
-    & data["pressure_kpa"].between(*p_rng)
-    & data["flow_cm_s"].between(*f_rng)
+    & in_range("oxygen_pct", o2_rng)
+    & in_range("pressure_kpa", p_rng)
+    & in_range("flow_cm_s", f_rng)
 ]
-ranking = rank_materials(view) if not view.empty else pd.DataFrame()
+measured = view.dropna(subset=["spread_rate_mm_s"])  # rows with a reported spread rate
+MIN_FOR_RANKING = 20  # below this, a risk ranking is not scientifically meaningful
+ranking = rank_materials(measured) if len(measured) >= MIN_FOR_RANKING else pd.DataFrame()
 
 # ----------------------------------------------------------------------------
 # Header
@@ -186,11 +204,15 @@ if view.empty:
     st.info("No experiments match the current filters.")
     st.stop()
 
+if len(measured) < MIN_FOR_RANKING:
+    st.warning(f"Only {len(measured)} of {len(view)} records have a reported spread rate, so the risk ranking is "
+               f"switched off (needs at least {MIN_FOR_RANKING}). Observed outcomes are shown instead.")
+
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Experiments", len(view))
 k2.metric("Materials", view["material"].nunique())
-k3.metric("Fastest spread", f"{view['spread_rate_mm_s'].max():.2f} mm/s")
-k4.metric("Highest-risk material", ranking.iloc[0]["material"])
+k3.metric("Fastest reported spread", f"{measured['spread_rate_mm_s'].max():.2f} mm/s" if not measured.empty else "n/a")
+k4.metric("Highest-risk material", ranking.iloc[0]["material"] if not ranking.empty else "n/a (too few data)")
 
 tab_rank, tab_explore, tab_ai, tab_chat, tab_about = st.tabs(
     ["🏆 Risk ranking", "📈 Explorer", "🧠 AI insights", "💬 Ask the data", "ℹ️ Method & sources"]
@@ -199,6 +221,11 @@ tab_rank, tab_explore, tab_ai, tab_chat, tab_about = st.tabs(
 COLORS = {"Low": "#2ecc71", "Medium": "#f1c40f", "High": "#e74c3c"}
 
 with tab_rank:
+  if ranking.empty:
+    st.info("Risk ranking is off for this dataset size. Observed experiment outcomes (as reported by NASA):")
+    cols = [c for c in ["material", "configuration", "oxygen_pct", "flow_cm_s", "spread_rate_mm_s", "outcome", "record_id"] if c in view.columns]
+    st.dataframe(view[cols], width="stretch", hide_index=True)
+  else:
     fig = px.bar(ranking, x="mean_risk", y="material", orientation="h", color="risk_level",
                  color_discrete_map=COLORS, template="plotly_dark",
                  labels={"mean_risk": "Mean risk score (0-100)", "material": ""},
@@ -208,19 +235,22 @@ with tab_rank:
     st.dataframe(ranking, width="stretch", hide_index=True)
 
 with tab_explore:
-    c1, c2 = st.columns(2)
-    f1 = px.scatter(view, x="oxygen_pct", y="spread_rate_mm_s", color="material", size="risk_score",
-                    hover_data=["pressure_kpa", "flow_cm_s", "risk_score"], template="plotly_dark",
-                    title="Flame spread vs oxygen", labels={"oxygen_pct": "Oxygen (%)", "spread_rate_mm_s": "Spread (mm/s)"})
-    c1.plotly_chart(f1, width="stretch")
-    f2 = px.scatter(view, x="flow_cm_s", y="spread_rate_mm_s", color="material", template="plotly_dark",
-                    title="Flame spread vs airflow", labels={"flow_cm_s": "Flow (cm/s)", "spread_rate_mm_s": "Spread (mm/s)"})
-    c2.plotly_chart(f2, width="stretch")
-    heat = view.pivot_table(index="material", columns="oxygen_pct", values="spread_rate_mm_s", aggfunc="mean")
-    f3 = px.imshow(heat, aspect="auto", color_continuous_scale="YlOrRd", template="plotly_dark",
-                   title="Average spread rate: material × oxygen (%)",
-                   labels={"color": "mm/s", "x": "Oxygen (%)", "y": ""})
-    st.plotly_chart(f3, width="stretch")
+    if measured.empty:
+        st.info("No records with a reported spread rate to chart.")
+    else:
+        c1, c2 = st.columns(2)
+        f1 = px.scatter(measured, x="oxygen_pct", y="spread_rate_mm_s", color="material", size="risk_score",
+                        hover_data=["pressure_kpa", "flow_cm_s", "risk_score"], template="plotly_dark",
+                        title="Flame spread vs oxygen", labels={"oxygen_pct": "Oxygen (%)", "spread_rate_mm_s": "Spread (mm/s)"})
+        c1.plotly_chart(f1, width="stretch")
+        f2 = px.scatter(measured, x="flow_cm_s", y="spread_rate_mm_s", color="material", template="plotly_dark",
+                        title="Flame spread vs airflow", labels={"flow_cm_s": "Flow (cm/s)", "spread_rate_mm_s": "Spread (mm/s)"})
+        c2.plotly_chart(f2, width="stretch")
+        heat = measured.pivot_table(index="material", columns="oxygen_pct", values="spread_rate_mm_s", aggfunc="mean")
+        f3 = px.imshow(heat, aspect="auto", color_continuous_scale="YlOrRd", template="plotly_dark",
+                       title="Average spread rate: material × oxygen (%)",
+                       labels={"color": "mm/s", "x": "Oxygen (%)", "y": ""})
+        st.plotly_chart(f3, width="stretch")
     with st.expander("Raw data"):
         st.dataframe(view, width="stretch", hide_index=True)
 
