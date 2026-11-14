@@ -1,0 +1,2 @@
+M6: 2 velocity entries but 1 spread-rate entry; not paired.
+M12: 2 velocity entries but 1 spread-rate entry; not paired.
