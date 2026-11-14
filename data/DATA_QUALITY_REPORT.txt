@@ -1,0 +1,80 @@
+FlameLens — BASS-II DATA QUALITY REPORT (oxygen integration)
+Generated: 2026-11-14
+Primary source: NASA/TM-20210011385, BASS-II Summary Report
+Inputs: BASS_II_RAW.csv, BASS_II_OBSERVATIONS.csv, OXYGEN_SEGMENT_DATA.csv,
+        OXYGEN_ANALYSIS.md, OXYGEN_VALIDATION_REPORT.txt
+
+1. INTEGRATION SUMMARY
+- Observation records in updated BASS_II_OBSERVATIONS.csv: 39
+- Oxygen estimates successfully matched by (test_id, segment_no, flow_cm_s): 4
+  - M8 figure-derived estimates: 3
+  - M9 low-confidence text-derived estimate: 1
+- Observation records with unrecoverable segment-average oxygen left blank: 35
+- Duplicate observation_id values: 0
+- Duplicate (parent_test_no, segment_no, flow_cm_s) keys: 0
+- Oxygen source rows in OXYGEN_SEGMENT_DATA.csv: 43
+- Oxygen source rows without a matching observation record: 4
+  These are M6 and M12 segments. Table 5.1 reports "Not tracked" spread rate for each
+  test and does not provide one spread-rate value per listed flow speed; they were not
+  fabricated or forced into the observation table.
+
+2. OXYGEN VALUES PRESERVED
+M8 (Figure 5.2, printed p.57; PDF p.65):
+- Segment 1, 10 cm/s: 18.99 vol%, uncertainty ±0.05 vol%, MEDIUM confidence.
+- Segment 2, 6 cm/s: 18.72 vol%, uncertainty ±0.05 vol%, MEDIUM confidence.
+- Segment 3, 5 cm/s: 18.39 vol%, uncertainty ±0.05 vol%, MEDIUM confidence.
+Method: NASA Section 5.4 linear-profile assumption; O2(t) = O2_initial +
+(O2_final - O2_initial) * t / 1499 s. Segment mean is the mean of profile values
+at the digitised segment boundaries. These are reproduced estimates, not NASA-published
+measurements. Figure digitisation and linearity assumptions limit accuracy.
+
+M9 (Table A.4 narrative + Table 5.1):
+- Segment 1, 14 cm/s: 17.78 vol%, uncertainty ±0.10 vol%, LOW confidence.
+Method: linear profile over 1008 s, using the assumed 108–1008 s interval based on
+the rounded operator note "died after 15 min at 14 cm/s; 17-min burn".
+This timing assumption is not confirmed by a figure. Keep clearly labelled LOW confidence.
+
+3. UNRECOVERABLE OXYGEN
+- 35 of 39 observation records retain a blank o2_segment_estimate_pct.
+- No initial/final O2 values were overwritten.
+- No segment mean was imputed from (initial + final)/2.
+- Source-provided bounds are not treated as estimates.
+- Symbol sizes in Figures 5.8/5.9 were not converted into numeric O2 values.
+
+4. MISSING VALUES IN UPDATED OBSERVATION TABLE
+- spread_rate_mm_s: 0 of 39
+- o2_initial_pct: 0 of 39
+- o2_final_pct: 0 of 39
+- o2_segment_estimate_pct: 35 of 39
+- o2_segment_uncertainty_pct: 35 of 39
+- pressure_kpa: 39 of 39
+Pressure remains blank because Table 5.1 does not report pressure.
+
+5. VALIDATION CHECKS
+- Join key uniqueness in source observation file: PASS
+- Join key uniqueness in oxygen segment source: PASS
+- One-to-one merge for all 39 observation rows: PASS
+- M8 estimates exactly preserved (18.99, 18.72, 18.39): PASS
+- M9 value 17.78 preserved and LOW confidence: PASS
+- All other segment oxygen estimates blank: PASS
+- Initial and final oxygen columns retained: PASS
+- No pressure values invented: PASS
+- Duplicate observation IDs: 0
+- Duplicate observation composite keys: 0
+
+6. LIMITATIONS / OPEN ISSUES
+- The updated observation file contains 39 paired segments, not all 43 flow rows in the
+  oxygen-analysis source. Four M6/M12 flow rows are not paired because spread rate is
+  marked "Not tracked"; see BASS_II_PAIRING_ISSUES.txt.
+- Only M8 has figure-derived segment timing. M9 is a low-confidence estimate based on
+  rounded narrative timing. Other segment means remain unrecoverable.
+- The 0.05 and 0.10 vol% uncertainty values are inherited from the supplied oxygen
+  analysis. They do not quantify all systematic error, especially the linear-profile
+  assumption for M8 and timing assumption for M9.
+- This report validates the data merge and internal consistency. It is not an independent
+  re-digitisation of NASA's source figures.
+
+7. SAFETY OF PROJECT FILES
+- Original Saffire experiments.csv was not read or modified by this integration workflow.
+- app.py was not changed.
+- No pressure values or missing spread-rate values were invented.
